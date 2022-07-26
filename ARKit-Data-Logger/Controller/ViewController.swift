@@ -11,7 +11,9 @@ import SceneKit
 import ARKit
 import os.log
 import Accelerate
-
+import Kronos
+import CoreMotion
+import Foundation
 
 class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     
@@ -33,8 +35,66 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     var isRecording: Bool = false
     let customQueue: DispatchQueue = DispatchQueue(label: "pyojinkim.me")
     var accumulatedPointCloud = AccumulatedPointCloud()
+    let motionManager = CMMotionManager();
+    let startString = String(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short));
+  
     
+    var documentURL: NSURL {
+        let documentURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0] as NSURL
+        let documentURLCur = documentURL.appendingPathComponent(startString, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: documentURLCur!.path) {
+            do {
+                try FileManager.default.createDirectory(at: documentURLCur!, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                print(error.localizedDescription)
+            }
+        }
+        return documentURLCur as! NSURL
+    }
     
+    var depthMapURL: NSURL {
+        let depthMapURL = documentURL.appendingPathComponent("DepthMap", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: depthMapURL!.path) {
+            do {
+                try FileManager.default.createDirectory(at: depthMapURL!, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                print(error.localizedDescription)
+            }
+        }
+        
+        return depthMapURL! as NSURL
+    }
+    
+    var gravURL: NSURL {
+        let gravURL = documentURL.appendingPathComponent("Grav", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: gravURL!.path) {
+            do {
+                try FileManager.default.createDirectory(at: gravURL!, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                print(error.localizedDescription)
+            }
+        }
+        
+        return gravURL! as NSURL
+    }
+    
+    var capturedImageURL: NSURL {
+        let capturedImageURL = documentURL.appendingPathComponent("CapturedImage", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: capturedImageURL!.path) {
+            do {
+                try FileManager.default.createDirectory(at: capturedImageURL!, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                print(error.localizedDescription)
+            }
+        }
+        return capturedImageURL! as NSURL
+    }
+    
+    var dateFormat: DateFormatter {
+        let format = DateFormatter()
+        format.dateFormat = "yyyyMMddHHmmssSSS"
+        return format
+    }
     // variables for measuring time in iOS clock
     var recordingTimer: Timer = Timer()
     var secondCounter: Int64 = 0 {
@@ -43,7 +103,11 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
     }
     var previousTimestamp: Double = 0
+    
     let mulSecondToNanoSecond: Double = 1000000000
+    
+    //init offset and synchronization variable
+    var offset = 0.0;
     
     
     // text file input & output
@@ -54,14 +118,38 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        if ((motionManager.isAccelerometerAvailable) != nil) {
+            motionManager.accelerometerUpdateInterval = 0.1
+            motionManager.startDeviceMotionUpdates(to: .main) { (motion, error) in
+            }
+        }
         
         // set debug option
         self.sceneView.debugOptions = [ARSCNDebugOptions.showFeaturePoints, ARSCNDebugOptions.showWorldOrigin]
         
+        //set status to time synchronization
+        self.statusLabel.text = "Time Sync"
         
-        // change status text to "Ready"
-        statusLabel.text = "Ready"
-        
+        Clock.sync (from:"fi.pool.ntp.org",samples:2,completion: { date, offset in
+            if(offset==nil){
+                print("sync failed");
+                exit(0)
+            }else{
+                var uptime = ProcessInfo.processInfo.systemUptime;
+                self.offset = date!.timeIntervalSince1970 - uptime
+                self.statusLabel.text = "Ready"
+                print("completed synchronization with offset:",offset)
+                AudioServicesPlaySystemSound(1003);
+                var timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                    Clock.sync (from:"fi.pool.ntp.org",samples: 2, completion: { date, offset in
+                        var uptime = ProcessInfo.processInfo.systemUptime;
+                        self!.offset = date!.timeIntervalSince1970 - uptime;
+                        print("resynhronization with offset:",offset)
+                    } );
+                }
+            }
+            
+        } );
         
         // set the view's delegate
         sceneView.delegate = self
@@ -75,7 +163,9 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         // Create a session configuration
         let configuration = ARWorldTrackingConfiguration()
-        
+        if type(of: configuration).supportsFrameSemantics(.sceneDepth) {
+            configuration.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
+        }
         // Run the view's session
         sceneView.session.run(configuration)
     }
@@ -126,6 +216,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 self.isRecording = false
                 
                 // save ARKit 3D point cloud only for visualization
+                if(self.accumulatedPointCloud.count>0){
                 for i in 0...(self.accumulatedPointCloud.count - 1) {
                     let ARKitPointData = String(format: "%.6f %.6f %.6f %d %d %d \n",
                                                 self.accumulatedPointCloud.points[i].x,
@@ -139,6 +230,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                     } else {
                         os_log("Failed to write data record", log: OSLog.default, type: .fault)
                     }
+                }
                 }
                 
                 // close the file handlers
@@ -168,12 +260,17 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     }
     
     
+    
+    
     // define if ARSession is didUpdate (callback function)
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         
         // obtain current transformation 4x4 matrix
-        let timestamp = frame.timestamp * self.mulSecondToNanoSecond
-        let updateRate = self.mulSecondToNanoSecond / Double(timestamp - previousTimestamp)
+        let timestamp =  frame.timestamp + self.offset; //* self.mulSecondToNanoSecond
+        
+//        print(timestamp);
+        let updateRate = 1 / Double(timestamp - previousTimestamp)
+        //let updateRate = self.mulSecondToNanoSecond / Double(timestamp - previousTimestamp)
         previousTimestamp = timestamp
         
         let imageFrame = frame.capturedImage
@@ -223,11 +320,56 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
         
         // custom queue to save ARKit processing data
-        self.customQueue.async {
+        DispatchQueue.global(qos: .userInteractive).async {[self] in
+        
             if ((self.fileHandlers.count == self.numTextFiles) && self.isRecording) {
                 
+                var gravVector = [Double]()
+            
+               gravVector.append((self.motionManager.deviceMotion?.gravity.x)!)
+                gravVector.append((self.motionManager.deviceMotion?.gravity.y)!)
+                gravVector.append((self.motionManager.deviceMotion?.gravity.z)!)
+                
+                let gravFile = "grav_\(timestamp).bin"
+                let binfileURLGrav = self.gravURL.appendingPathComponent(gravFile)
+
+                let wData = Data(bytes: &gravVector, count: gravVector.count * MemoryLayout<Double>.stride)
+                try! wData.write(to: binfileURLGrav!)
+                
+            if let depth = frame.depthMap {
+              
+                let depthWidth = CVPixelBufferGetWidth(depth)
+                let depthHeight = CVPixelBufferGetHeight(depth)
+               
+                CVPixelBufferLockBaseAddress(depth, CVPixelBufferLockFlags.readOnly)
+                let floatBuffer = unsafeBitCast(CVPixelBufferGetBaseAddress(depth), to: UnsafeMutablePointer<Float>.self)
+                
+                var depthArray = [Float32]()
+                for x in 0...((depthHeight)*(depthWidth)){
+                    depthArray.append(floatBuffer[x])
+                }
+                CVPixelBufferUnlockBaseAddress(depth, CVPixelBufferLockFlags.readOnly)
+                
+                //test
+                let binFile = "depth_\(timestamp).bin"
+                let binfileURLImage = self.depthMapURL.appendingPathComponent(binFile)
+
+                let wData = Data(bytes: &depthArray, count: depthArray.count * MemoryLayout<Float>.stride)
+                try! wData.write(to: binfileURLImage!)
+
+              }
+
+            let capturedImage = frame.capturedImageAsDepthMapScale
+
+            let filenameImage = "capturedImage_\(timestamp).jpg"
+                let fileURLImage = self.capturedImageURL.appendingPathComponent(filenameImage)
+
+            if let image = capturedImage?.jpegData(compressionQuality: 0.9) {
+                try? image.write(to: fileURLImage!)
+            }
+                
                 // 1) record ARKit 6-DoF camera pose
-                let ARKitPoseData = String(format: "%.0f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f \n",
+                let ARKitPoseData = String(format: "%.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f \n",
                                            timestamp,
                                            r_11, r_12, r_13, t_x,
                                            r_21, r_22, r_23, t_y,
@@ -273,20 +415,23 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                     
                     
                     // perform YCbCr image sampling
-                    for i in 0...(projectedPoints.count - 1) {
-                        let projectedPoint = projectedPoints[i]
-                        let lumaPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                        let cbcrPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                        
-                        let lumaPixelAddress = scaledLumaBuffer.data + scaledLumaBuffer.rowBytes * Int(lumaPoint.y) + Int(lumaPoint.x)
-                        let cbcrPixelAddress = scaledCbcrBuffer.data + scaledCbcrBuffer.rowBytes * Int(cbcrPoint.y) + Int(cbcrPoint.x) * 2;
-                        
-                        let luma = lumaPixelAddress.load(as: UInt8.self)
-                        let cb = cbcrPixelAddress.load(as: UInt8.self)
-                        let cr = (cbcrPixelAddress + 1).load(as: UInt8.self)
-                        
-                        let color = simd_make_uint3(UInt32(luma), UInt32(cb), UInt32(cr))
-                        self.accumulatedPointCloud.appendPointCloud(validPoints[i], validIdentifiers[i], color)
+                    //additional check if points have been found
+                    if(projectedPoints.count>0){
+                        for i in 0...(projectedPoints.count - 1) {
+                            let projectedPoint = projectedPoints[i]
+                            let lumaPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
+                            let cbcrPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
+                            
+                            let lumaPixelAddress = scaledLumaBuffer.data + scaledLumaBuffer.rowBytes * Int(lumaPoint.y) + Int(lumaPoint.x)
+                            let cbcrPixelAddress = scaledCbcrBuffer.data + scaledCbcrBuffer.rowBytes * Int(cbcrPoint.y) + Int(cbcrPoint.x) * 2;
+                            
+                            let luma = lumaPixelAddress.load(as: UInt8.self)
+                            let cb = cbcrPixelAddress.load(as: UInt8.self)
+                            let cr = (cbcrPixelAddress + 1).load(as: UInt8.self)
+                            
+                            let color = simd_make_uint3(UInt32(luma), UInt32(cb), UInt32(cr))
+                            self.accumulatedPointCloud.appendPointCloud(validPoints[i], validIdentifiers[i], color)
+                        }
                     }
                 }
             }
@@ -313,7 +458,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         // create ARKit result text files
         let startHeader = ""
         for i in 0...(self.numTextFiles - 1) {
-            var url = URL(fileURLWithPath: NSTemporaryDirectory())
+            var url =  documentURL as URL
             url.appendPathComponent(fileNames[i])
             self.fileURLs.append(url)
             
@@ -343,7 +488,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         }
         
         // write current recording time information
-        let timeHeader = "# Created at \(timeToString()) in Burnaby Canada \n"
+        let timeHeader = "# Created at \(timeToString()) in Helsinki Hood \n"
         for i in 0...(self.numTextFiles - 1) {
             if let timeHeaderToWrite = timeHeader.data(using: .utf8) {
                 self.fileHandlers[i].write(timeHeaderToWrite)
