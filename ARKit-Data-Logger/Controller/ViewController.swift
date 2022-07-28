@@ -37,6 +37,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     var accumulatedPointCloud = AccumulatedPointCloud()
     let motionManager = CMMotionManager();
     let startString = String(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short));
+    var log_K=true;
   
     
     var documentURL: NSURL {
@@ -275,7 +276,20 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         let imageFrame = frame.capturedImage
         let imageResolution = frame.camera.imageResolution
-        let K = frame.camera.intrinsics
+        
+
+        if(self.log_K){
+            self.log_K=false;
+            let K = frame.camera.intrinsics
+            
+            let filename = documentURL.appendingPathComponent("intrinsics.txt")
+            let K_string = [String(K[0,0]),String(K[1,0]),String(K[2,0]),String(K[0,1]),String(K[1,1]),String(K[2,1]),String(K[0,2]),String(K[1,2]),String(K[2,2])].joined(separator: " ")
+            do {
+                try K_string.write(to: filename!, atomically: true, encoding: String.Encoding.utf8)
+            } catch {
+                // failed to write file – bad permissions, bad filename, missing permissions, or more likely it can't be converted to the encoding
+            }
+        }
         
         let ARKitWorldMappingStatus = frame.worldMappingStatus.rawValue
         let ARKitTrackingState = frame.camera.trackingState
