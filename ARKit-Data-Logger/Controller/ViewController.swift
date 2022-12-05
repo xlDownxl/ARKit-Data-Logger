@@ -29,12 +29,13 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     @IBOutlet weak var updateRateLabel: UILabel!
     
     // constants for collecting data
-    let numTextFiles = 2
+    let numTextFiles = 3
     let ARKIT_CAMERA_POSE = 0
-    let ARKIT_POINT_CLOUD = 1
+    let ACCELEROMETER = 1
+    let GYRO = 2
     var isRecording: Bool = false
-    let customQueue: DispatchQueue = DispatchQueue(label: "pyojinkim.me")
-    var accumulatedPointCloud = AccumulatedPointCloud()
+    let customQueue: DispatchQueue = DispatchQueue(label: "Processing")
+    let imuQueue: OperationQueue = OperationQueue()
     let motionManager = CMMotionManager();
     let startString = String(DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short));
     var log_K=true;
@@ -110,20 +111,28 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     //init offset and synchronization variable
     var offset = 0.0;
     
+    var gyroStack = [[Double]]();
+    var accelStack = [[Double]]();
+    //let accelFile = "accel.bin"
+    
+    
     
     // text file input & output
     var fileHandlers = [FileHandle]()
     var fileURLs = [URL]()
-    var fileNames: [String] = ["ARKit_camera_pose.txt", "ARKit_point_cloud.txt"]
+    var fileNames: [String] = ["ARKit_camera_pose.txt", "accelerometer.txt","gyro.txt"]
     
+    var binfileURLAccel = URL(string: "");
     
     override func viewDidLoad() {
         super.viewDidLoad()
         if ((motionManager.isAccelerometerAvailable) != nil) {
-            motionManager.accelerometerUpdateInterval = 0.1
+//            motionManager.accelerometerUpdateInterval = 0.1
             motionManager.startDeviceMotionUpdates(to: .main) { (motion, error) in
             }
         }
+        
+        binfileURLAccel = documentURL.appendingPathComponent("accel.bin");
         
         // set debug option
         self.sceneView.debugOptions = [ARSCNDebugOptions.showFeaturePoints, ARSCNDebugOptions.showWorldOrigin]
@@ -131,7 +140,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         //set status to time synchronization
         self.statusLabel.text = "Time Sync"
         
-        Clock.sync (from:"fi.pool.ntp.org",samples:2,completion: { date, offset in
+        Clock.sync (from:"fi.pool.ntp.org",samples:5,completion: { date, offset in
             if(offset==nil){
                 print("sync failed");
                 exit(0)
@@ -184,6 +193,40 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     @IBAction func startStopButtonPressed(_ sender: UIButton) {
         if (self.isRecording == false) {
             
+            self.motionManager.startGyroUpdates(to: imuQueue) { (motion, error) in
+                let timestamp =  (motion?.timestamp ?? 0)! + self.offset; //* self.mulSecondToNanoSecond
+                let gyroString = String(format: "%.6f %.6f %.6f %.6f \n",
+                                        timestamp,motion!.rotationRate.x, motion!.rotationRate.y, motion!.rotationRate.z)
+                if let GyroDataToWrite = gyroString.data(using: .utf8) {
+                    do{
+                        if (self.isRecording){
+                            try self.fileHandlers[self.GYRO].write(GyroDataToWrite)
+                }}
+                    catch {
+                        os_log("error")
+                    }
+                } else {
+                    os_log("Failed to write data record", log: OSLog.default, type: .fault)
+                }
+                
+            }
+            self.motionManager.startAccelerometerUpdates(to: imuQueue) { (motion, error) in
+                let timestamp =  (motion?.timestamp ?? 0)! + self.offset; //* self.mulSecondToNanoSecond
+                let accString = String(format: "%.6f %.6f %.6f %.6f \n",
+                                        timestamp, motion!.acceleration.x, motion!.acceleration.y, motion!.acceleration.z)
+                if let AccDataToWrite = accString.data(using: .utf8) {
+                    do{
+                        if (self.isRecording){
+                            try self.fileHandlers[self.ACCELEROMETER].write(AccDataToWrite)
+                        }}
+                    catch {
+                        os_log("error")
+                    }
+                } else {
+                    os_log("Failed to write data record", log: OSLog.default, type: .fault)
+                }
+            }
+            
             // start ARKit data recording
             customQueue.async {
                 if (self.createFiles()) {
@@ -207,38 +250,26 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 }
             }
         } else {
-            
+            self.isRecording = false;
             // stop recording and share the recorded text file
             if (recordingTimer.isValid) {
                 recordingTimer.invalidate()
             }
+            self.motionManager.stopGyroUpdates();
+            self.motionManager.stopAccelerometerUpdates();
             
             customQueue.async {
-                self.isRecording = false
-                
-                // save ARKit 3D point cloud only for visualization
-                if(self.accumulatedPointCloud.count>0){
-                for i in 0...(self.accumulatedPointCloud.count - 1) {
-                    let ARKitPointData = String(format: "%.6f %.6f %.6f %d %d %d \n",
-                                                self.accumulatedPointCloud.points[i].x,
-                                                self.accumulatedPointCloud.points[i].y,
-                                                self.accumulatedPointCloud.points[i].z,
-                                                self.accumulatedPointCloud.colors[i].x,
-                                                self.accumulatedPointCloud.colors[i].y,
-                                                self.accumulatedPointCloud.colors[i].z)
-                    if let ARKitPointDataToWrite = ARKitPointData.data(using: .utf8) {
-                        self.fileHandlers[self.ARKIT_POINT_CLOUD].write(ARKitPointDataToWrite)
-                    } else {
-                        os_log("Failed to write data record", log: OSLog.default, type: .fault)
-                    }
-                }
-                }
-                
+             
                 // close the file handlers
                 if (self.fileHandlers.count == self.numTextFiles) {
-                    for handler in self.fileHandlers {
-                        handler.closeFile()
-                    }
+                    
+                    let handlerPose = self.fileHandlers[self.ARKIT_CAMERA_POSE]
+                    handlerPose.closeFile()
+                    let handlerAcc = self.fileHandlers[self.ACCELEROMETER]
+                    handlerAcc.closeFile()
+                    let handlerGyro = self.fileHandlers[self.GYRO]
+                    handlerGyro.closeFile()
+                    
                     DispatchQueue.main.async {
                         let activityVC = UIActivityViewController(activityItems: self.fileURLs, applicationActivities: nil)
                         self.present(activityVC, animated: true, completion: nil)
@@ -313,7 +344,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         // dispatch queue to display UI
         DispatchQueue.main.async {
-            self.numberOfFeatureLabel.text = String(format:"%05d", self.accumulatedPointCloud.count)
+            
             self.trackingStatusLabel.text = "\(ARKitTrackingState)"
             self.updateRateLabel.text = String(format:"%.3f Hz", updateRate)
             
@@ -340,9 +371,29 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 
                 var gravVector = [Double]()
             
-               gravVector.append((self.motionManager.deviceMotion?.gravity.x)!)
+                gravVector.append((self.motionManager.deviceMotion?.gravity.x)!)
                 gravVector.append((self.motionManager.deviceMotion?.gravity.y)!)
                 gravVector.append((self.motionManager.deviceMotion?.gravity.z)!)
+                
+                /*var accelVec = [Double]()
+                accelVec.append(self.motionManager.accelerometerData?.acceleration.x ?? 0);
+                accelVec.append(self.motionManager.accelerometerData?.acceleration.y ?? 0);
+                accelVec.append(self.motionManager.accelerometerData?.acceleration.z ?? 0);
+                var gyroVec = [Double]()
+                gyroVec.append(self.motionManager.gyroData?.rotationRate.x ?? 0);
+                gyroVec.append(self.motionManager.gyroData?.rotationRate.y ?? 0);
+                gyroVec.append(self.motionManager.gyroData?.rotationRate.z ?? 0);
+                
+                
+                accelStack.append(accelVec);
+                gyroStack.append(accelVec);*/
+                
+                
+//                binfileURLAccel
+//                print(accelVec);
+//                print(gyroVec);
+              
+               
                 
                 let gravFile = "grav_\(timestamp).bin"
                 let binfileURLGrav = self.gravURL.appendingPathComponent(gravFile)
@@ -389,65 +440,20 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                                            r_21, r_22, r_23, t_y,
                                            r_31, r_32, r_33, t_z)
                 if let ARKitPoseDataToWrite = ARKitPoseData.data(using: .utf8) {
-                    self.fileHandlers[self.ARKIT_CAMERA_POSE].write(ARKitPoseDataToWrite)
+                    do{
+                        if (self.isRecording){
+                            try self.fileHandlers[self.ARKIT_CAMERA_POSE].write(ARKitPoseDataToWrite)
+                        }
+                        }
+                    catch {
+                        // Couldn't create audio player object, log the error
+                        print("error")
+                    }
                 } else {
                     os_log("Failed to write data record", log: OSLog.default, type: .fault)
                 }
                 
-                // 2) record ARKit 3D point cloud only for visualization
-                if let rawFeaturePointsArray = frame.rawFeaturePoints {
-                    
-                    // constants for feature points
-                    let points = rawFeaturePointsArray.points
-                    let identifiers = rawFeaturePointsArray.identifiers
-                    let pointsCount = points.count
-                    
-                    let kDownscaleFactor: CGFloat = 4.0
-                    let scale = Double(1 / kDownscaleFactor)
-                    
-                    var projectedPoints = [CGPoint]()
-                    var validPoints = [vector_float3]()
-                    var validIdentifiers = [UInt64]()
-                    
-                    
-                    // project all feature points into image 2D coordinate
-                    for i in 0...(pointsCount - 1) {
-                        let projectedPoint = frame.camera.projectPoint(points[i], orientation: .landscapeRight, viewportSize: imageResolution)
-                        if ((projectedPoint.x >= 0 && projectedPoint.x <= imageResolution.width - 1) &&
-                            (projectedPoint.y >= 0 && projectedPoint.y <= imageResolution.height - 1)) {
-                            projectedPoints.append(projectedPoint)
-                            validPoints.append(points[i])
-                            validIdentifiers.append(identifiers[i])
-                        }
-                    }
-                    
-                    
-                    // compute scaled YCbCr image buffer
-                    let scaledBuffer = self.IBASampleScaledCapturedPixelBuffer(imageFrame: imageFrame, scale: scale)
-                    let scaledLumaBuffer = scaledBuffer.0
-                    let scaledCbcrBuffer = scaledBuffer.1
-                    
-                    
-                    // perform YCbCr image sampling
-                    //additional check if points have been found
-                    if(projectedPoints.count>0){
-                        for i in 0...(projectedPoints.count - 1) {
-                            let projectedPoint = projectedPoints[i]
-                            let lumaPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                            let cbcrPoint = CGPoint(x: Double(projectedPoint.x) * scale, y: Double(projectedPoint.y) * scale)
-                            
-                            let lumaPixelAddress = scaledLumaBuffer.data + scaledLumaBuffer.rowBytes * Int(lumaPoint.y) + Int(lumaPoint.x)
-                            let cbcrPixelAddress = scaledCbcrBuffer.data + scaledCbcrBuffer.rowBytes * Int(cbcrPoint.y) + Int(cbcrPoint.x) * 2;
-                            
-                            let luma = lumaPixelAddress.load(as: UInt8.self)
-                            let cb = cbcrPixelAddress.load(as: UInt8.self)
-                            let cr = (cbcrPixelAddress + 1).load(as: UInt8.self)
-                            
-                            let color = simd_make_uint3(UInt32(luma), UInt32(cb), UInt32(cr))
-                            self.accumulatedPointCloud.appendPointCloud(validPoints[i], validIdentifiers[i], color)
-                        }
-                    }
-                }
+              
             }
         }
     }
