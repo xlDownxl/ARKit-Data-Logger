@@ -29,10 +29,11 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     @IBOutlet weak var updateRateLabel: UILabel!
     
     // constants for collecting data
-    let numTextFiles = 3
+    let numTextFiles = 4
     let ARKIT_CAMERA_POSE = 0
     let ACCELEROMETER = 1
     let GYRO = 2
+    let GRAVITY = 3
     var isRecording: Bool = false
     let customQueue: DispatchQueue = DispatchQueue(label: "Processing")
     let imuQueue: OperationQueue = OperationQueue()
@@ -120,7 +121,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     // text file input & output
     var fileHandlers = [FileHandle]()
     var fileURLs = [URL]()
-    var fileNames: [String] = ["ARKit_camera_pose.txt", "accelerometer.txt","gyro.txt"]
+    var fileNames: [String] = ["ARKit_camera_pose.txt", "accelerometer.txt","gyro.txt", "grav.txt"]
     
     var binfileURLAccel = URL(string: "");
     
@@ -140,7 +141,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         //set status to time synchronization
         self.statusLabel.text = "Time Sync"
         
-        Clock.sync (from:"fi.pool.ntp.org",samples:5,completion: { date, offset in
+        Clock.sync (from:"time.apple.com",samples:10,completion: { date, offset in
             if(offset==nil){
                 print("sync failed");
                 exit(0)
@@ -150,8 +151,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 self.statusLabel.text = "Ready"
                 print("completed synchronization with offset:",offset)
                 AudioServicesPlaySystemSound(1003);
-                var timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-                    Clock.sync (from:"fi.pool.ntp.org",samples: 2, completion: { date, offset in
+                var timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                    Clock.sync (from:"time.apple.com",samples: 5, completion: { date, offset in
                         var uptime = ProcessInfo.processInfo.systemUptime;
                         self!.offset = date!.timeIntervalSince1970 - uptime;
                         print("resynhronization with offset:",offset)
@@ -192,7 +193,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
     // when the Start/Stop button is pressed
     @IBAction func startStopButtonPressed(_ sender: UIButton) {
         if (self.isRecording == false) {
-            
+            //self.motionManager.accelerometerUpdateInterval=0.5;
             self.motionManager.startGyroUpdates(to: imuQueue) { (motion, error) in
                 let timestamp =  (motion?.timestamp ?? 0)! + self.offset; //* self.mulSecondToNanoSecond
                 let gyroString = String(format: "%.6f %.6f %.6f %.6f \n",
@@ -214,6 +215,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                 let timestamp =  (motion?.timestamp ?? 0)! + self.offset; //* self.mulSecondToNanoSecond
                 let accString = String(format: "%.6f %.6f %.6f %.6f \n",
                                         timestamp, motion!.acceleration.x, motion!.acceleration.y, motion!.acceleration.z)
+                //print(motion!.acceleration)
                 if let AccDataToWrite = accString.data(using: .utf8) {
                     do{
                         if (self.isRecording){
@@ -269,6 +271,8 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
                     handlerAcc.closeFile()
                     let handlerGyro = self.fileHandlers[self.GYRO]
                     handlerGyro.closeFile()
+                    let handlerGrav = self.fileHandlers[self.GRAVITY]
+                    handlerGrav.closeFile()
                     
                     DispatchQueue.main.async {
                         let activityVC = UIActivityViewController(activityItems: self.fileURLs, applicationActivities: nil)
@@ -299,6 +303,7 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
         
         // obtain current transformation 4x4 matrix
         let timestamp =  frame.timestamp + self.offset; //* self.mulSecondToNanoSecond
+        
         
 //        print(timestamp);
         let updateRate = 1 / Double(timestamp - previousTimestamp)
@@ -392,14 +397,29 @@ class ViewController: UIViewController, ARSCNViewDelegate, ARSessionDelegate {
 //                binfileURLAccel
 //                print(accelVec);
 //                print(gyroVec);
-              
+   
+                let GravString = String(format: "%.6f %.6f %.6f %.6f \n",
+                                           timestamp,
+                                        (self.motionManager.deviceMotion?.gravity.x)!,
+                                        (self.motionManager.deviceMotion?.gravity.y)!,
+                                        (self.motionManager.deviceMotion?.gravity.z)!)
+                if let GravDataToWrite = GravString.data(using: .utf8) {
+                    do{
+                        if (self.isRecording){
+                            try self.fileHandlers[self.GRAVITY].write(GravDataToWrite)
+                        }
+                        }
+                    catch {
+                        // Couldn't create audio player object, log the error
+                        print("error")
+                    }
+                } else {
+                    os_log("Failed to write data record", log: OSLog.default, type: .fault)
+                }
                
-                
-                let gravFile = "grav_\(timestamp).bin"
-                let binfileURLGrav = self.gravURL.appendingPathComponent(gravFile)
 
-                let wData = Data(bytes: &gravVector, count: gravVector.count * MemoryLayout<Double>.stride)
-                try! wData.write(to: binfileURLGrav!)
+                //let wData = Data(bytes: &gravVector, count: gravVector.count * MemoryLayout<Double>.stride)
+                //try! wData.write(to: binfileURLGrav!)
                 
             if let depth = frame.depthMap {
               
