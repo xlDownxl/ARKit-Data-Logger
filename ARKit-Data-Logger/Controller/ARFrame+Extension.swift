@@ -47,9 +47,13 @@ extension ARFrame {
         
         let imageWidth = CVPixelBufferGetWidth(capturedImage)
         let imageHeight = CVPixelBufferGetHeight(capturedImage)
+        print(imageWidth)
+        print(imageHeight)
         
         let scaleX = 640.0 / Double(imageWidth)  //256
         let scaleY = 480.0 / Double(imageHeight)  //192
+        print(scaleX)
+        print(scaleY)
         
         let ciImage = CIImage(cvPixelBuffer: capturedImage)
         // resize as the scale of depth map
